@@ -1,0 +1,534 @@
+from sklearn.svm import SVC
+from sklearn.svm import SVR
+import sklearn.metrics.pairwise as pairwise
+from sklearn.metrics import accuracy_score, r2_score
+from sklearn.metrics import mean_absolute_error as mae
+from sklearn.metrics import hinge_loss
+from sklearn.base import BaseEstimator
+import numpy as np
+import numpy_indexed as npi
+import types
+import pickle
+from notebooks.utils import timer, profile
+
+aux_dir = 'aux_files'
+
+class extFusedMTLSVM(BaseEstimator):
+    'init'
+    """docstring for mtlSVM."""
+    def __init__(self, C=1.0, kernel='rbf', degree=3,
+                 gamma='auto', coef0=0.0, shrinking=True,
+                 tol=0.001, cache_size=200, verbose=False,
+                 max_iter=-1, mu=1.0, task_info=None,
+                 max_iter_ext=-1, opt='entropy', tol_ext=1e-3, delta=None, order_delta=None, lamb=1e-3,
+                 ind_reg=True):
+        self.C = C
+        self.kernel = kernel
+        self.degree = degree
+        self.gamma = gamma
+        self.coef0 = coef0
+        self.shrinking = shrinking
+        self.tol = tol
+        self.cache_size = cache_size
+        self.verbose = verbose
+        self.max_iter = max_iter
+        self.max_iter_ext = max_iter_ext
+        self.tol = tol
+        self.task_info = task_info
+        self.mu = mu # 1e-3
+        self.opt = opt
+        self.tol_ext = tol_ext
+        self.delta = delta
+        self.order_delta = order_delta
+        self.lamb = lamb
+        self.ind_reg = ind_reg
+        
+    def fit_gsearch(self, X, y, task_info=-1, sample_weight=None, **kwargs):
+        self.X_train = X
+        self.y_train = y
+        n, m = X.shape
+        if self.task_info is None:
+            self.task_info = task_info
+        task_col = self.task_info
+        self.unique, self.groups_idx = npi.group_by(X[:, task_col],
+                                                    np.arange(n))
+
+        if hasattr(self, 'epsilon'):
+            name_comb = '{}/{:.12f}_{:.12f}_{:.12f}'.format(aux_dir, self.C, self.epsilon, self.mu)
+        else:
+            name_comb = '{}/{:.12f}_{:.12f}'.format(aux_dir, self.C, self.mu)
+
+        if 'order_delta' in kwargs:
+            self.order_delta = kwargs['order_delta']
+        if self.gamma == 'auto':
+            self.gamma = 1
+        else:
+            self.gamma = self.gamma
+        if self.gamma == 'auto':
+            self.gamma = self.gamma
+        else:
+            self.gamma = self.gamma
+        
+        if self.max_iter_ext == 1:
+            if 'delta' in kwargs:
+                self.delta = kwargs['delta']
+            else:
+                T = len(self.unique)
+                delta = np.ones((T, T))
+                for i in range(T):
+                    delta[i, i] = 0
+                    delta[i, :] /= -np.sum(delta[i, :])
+                    delta[i, i] = -np.sum(delta[i, :])
+                self.delta = delta / np.sum(np.abs(delta))
+
+            self.deltainv_hist_ = []
+            self.delta_hist_ = []
+            self.dual_coef_hist_ = []
+            self.support_hist_ = []
+            self.intercept_hist_ = []
+            self.dots_hist_ = []
+            self.dists_hist_ = []
+
+        else:
+            # print('ITER > {} ---------------------------------------------------------'.format(self.max_iter_ext))  
+            # print(name_comb)
+            with open('{}_iter{}_self.p'.format(name_comb, self.max_iter_ext-1), 'rb') as file:
+                prev_model = pickle.load(file)
+                self.deltainv_hist_ = prev_model.deltainv_hist_
+                self.delta_hist_ = prev_model.delta_hist_
+                self.dual_coef_hist_ = prev_model.dual_coef_hist_
+                self.support_hist_ = prev_model.support_hist_
+                self.intercept_hist_ = prev_model.intercept_hist_
+                self.dots_hist_ = prev_model.dots_hist_
+                self.dists_hist_ = prev_model.dists_hist_
+                self.delta = prev_model.delta
+                self.G_train = prev_model.G_train
+
+        # Delta Fixed and Optimize SVM       
+        G_train = self._mtl_kernel_fused(X, X, self.kernel, self.kernel,
+                                         task_info, G_train_standard)
+        self.y = y
+
+        # print(G_train)
+        
+        self.svm.fit(G_train, self.y, sample_weight)
+        self.support_ = self.svm.support_
+        self.support_vectors_ = self.svm.support_vectors_
+        self.dual_coef_ = self.svm.dual_coef_
+        # self.coef_ = self.svm.coef_
+        self.intercept_ = self.svm.intercept_
+        self.sample_weight = sample_weight
+        self.task_info = task_info
+
+        self.deltainv_hist_.append(self.deltainv)
+        self.delta_hist_.append(self.delta)
+        self.dual_coef_hist_.append(self.dual_coef_)
+        self.support_hist_.append(self.support_)
+        self.intercept_hist_.append(self.intercept_)
+
+        # W fixed and optimize Delta
+        self.delta_old = self.delta
+        self.optimize_delta(G_train)
+        self.dots_hist_.append(self.dots.copy())
+        self.dists_hist_.append(self.dists.copy())
+
+        
+        with open('{}_iter{}_self.p'.format(name_comb, self.max_iter_ext), 'wb') as file:
+            pickle.dump(self, file)
+
+    # @profile(sort_by='cumulative', lines_to_print=10, strip_dirs=True)
+    def fit_no_gsearch(self, X, y, task_info=-1, sample_weight=None, **kwargs):
+        self.X_train = X
+        self.y_train = y
+        n, m = X.shape
+        if self.task_info is None:
+            self.task_info = task_info
+        task_col = self.task_info
+        self.unique, self.groups_idx = npi.group_by(X[:, task_col],
+                                                    np.arange(n))
+        X_data = np.delete(X, task_col, axis=1).astype(float)
+
+        if hasattr(self, 'epsilon'):
+            name_comb = '{}/{:.12f}_{:.12f}_{:.12f}'.format(aux_dir, self.C, self.epsilon, self.mu)
+        else:
+            name_comb = '{}/{:.12f}_{:.12f}'.format(aux_dir, self.C, self.mu)
+
+        if self.gamma == 'auto':
+            self.gamma = 1
+        else:
+            self.gamma = self.gamma
+        if self.gamma == 'auto':
+            self.gamma = self.gamma
+        else:
+            self.gamma = self.gamma
+        
+        if 'delta' in kwargs:
+            self.delta = kwargs['delta']
+        else:
+            T = len(self.unique)
+            B = np.ones((T, T))
+            for i in range(T):
+                B[i, i] = 0
+                B[i, :] /= -np.sum(B[i, :])
+                B[i, i] = -np.sum(B[i, :])
+            # B = B / np.sum(np.abs(B))
+            self.delta = (B + B.T)/2
+        if 'order_delta' in kwargs:
+            self.order_delta = kwargs['order_delta']
+        else:
+            self.order_delta = dict(zip(self.unique, range(len(self.unique))))
+
+        self.deltainv_hist_ = []
+        self.delta_hist_ = []
+        self.dual_coef_hist_ = []
+        self.support_hist_ = []
+        self.intercept_hist_ = []
+        self.dots_hist_ = []
+        self.dists_hist_ = []
+        self.score_hist_ = []
+        score = 0
+        # print('FIT OLD')
+        # Get G_train
+        G_train_standard = self._apply_kernel(self.kernel, X_data, X_data, self.gamma)
+
+        # print(self.max_iter_ext)
+        iter = 0
+        stopCondition = False
+        while not stopCondition:
+            # print('Delta')
+            # print(self.delta)
+            # print('ITER > {} ---------------------------------------------------------'.format(iter))  
+            # Delta Fixed and Optimize SVM       
+            G_train = self._mtl_kernel_fused(X, X, self.kernel, self.kernel,
+                                             task_info, G_train_standard)
+
+            # print('G_train')
+            # print(G_train)
+
+            # print(self.deltainv)
+            self.y = y
+            
+            self.svm.fit(G_train, self.y, sample_weight)
+            self.support_ = self.svm.support_
+            self.support_vectors_ = self.svm.support_vectors_
+            self.dual_coef_ = self.svm.dual_coef_
+            # self.coef_ = self.svm.coef_
+            self.intercept_ = self.svm.intercept_
+            self.sample_weight = sample_weight
+            self.task_info = task_info
+
+            self.deltainv_hist_.append(self.deltainv)
+            self.delta_hist_.append(self.delta)
+            
+            self.dual_coef_hist_.append(self.dual_coef_)
+            self.support_hist_.append(self.support_)
+            self.intercept_hist_.append(self.intercept_)
+            
+             # Score
+            prev_score = score
+            # print('Predict training set')
+            score = self.score(X, y)
+            # print('Score: {}'.format(score))
+            self.score_hist_.append(score)
+            #Stopping Condition
+            stopCondition = np.abs(prev_score - score) < self.tol_ext
+            stopCondition = stopCondition or ((iter >= self.max_iter_ext) if self.max_iter_ext > 0 else False)
+            if not stopCondition:
+                # W fixed and optimize Delta
+                # print(self.delta)
+                delta_old = self.delta
+                self.optimize_delta(G_train_standard)
+                self.dots_hist_.append(self.dots)
+                self.dists_hist_.append(self.dists)
+            else:
+                break
+            iter+=1
+            # print((iter >= self.max_iter_ext) if self.max_iter_ext > 0 else False)
+    
+    def fit(self, X, y, task_info=-1, sample_weight=None, **kwargs):
+        return self.fit_no_gsearch(X, y, task_info, sample_weight, **kwargs)
+
+
+    def predict(self, X):
+        G_test = self._mtl_kernel_fused(X, self.X_train, self.kernel, self.gamma, self.task_info)
+        return self.svm.predict(G_test)
+
+    def score(self, X, y, sample_weight=None, scoring=None):
+        G_test = self._mtl_kernel_fused(X, self.X_train, self.kernel, self.gamma, self.task_info)
+        y_pred = self.svm.predict(G_test)
+
+        n, m = X.shape
+        task_col = self.task_info
+        unique, groups_idx = npi.group_by(X[:, task_col],
+                                          np.arange(n))
+        self.scores = {}
+        for i, t in enumerate(unique):
+            y_true_g = y[groups_idx[i]]
+            y_pred_g = y_pred[groups_idx[i]]
+            if scoring is None:
+                self.scores[t] = self.score_fun(y_true_g, y_pred_g)
+            else:
+                self.scores[t] = scoring(y_true_g, y_pred_g)
+
+        if scoring is None:
+            return self.score_fun(y, y_pred, sample_weight)
+        else:
+            return scoring(y, y_pred, sample_weight)
+
+    def _get_kernel_fun(self, kernel):
+        # if not isinstance(kernel, (str, types.FunctionType)):
+        #     raise Exception('kernel of wrong type')
+        if isinstance(kernel, str):
+            kernel_f = getattr(pairwise, kernel+'_kernel')
+        else:
+            kernel_f = kernel
+        return kernel_f
+
+    def _apply_kernel(self, kernel, x, y, gamma):
+        kernel_f = self._get_kernel_fun(kernel)
+        if kernel_f == pairwise.rbf_kernel:
+            return kernel_f(x, y, gamma)
+        else:
+            return kernel_f(x, y)
+
+    # @timer
+    def _mtl_kernel_fused(self, X, Y, kernel, gamma, task_info=-1, G_train=None):
+        """
+        We create a custom kernel for multitask learning.
+            If task_info is a scalar it is assumed to be the column of the task
+            If task_info is an array it is assumed to be the task indexes
+        """
+        task_col = task_info
+
+        if self.ind_reg:
+            delta = self.delta + self.mu * np.identity(self.delta.shape[0])
+        self.deltainv = np.linalg.inv(delta)
+
+        order_delta = self.order_delta
+        
+
+        X_data = np.delete(X, task_col, axis=1).astype(float)
+        Y_data = np.delete(Y, task_col, axis=1).astype(float)
+        nX = X_data.shape[0]
+        nY = Y_data.shape[0]
+        task_X = X[:, task_col]
+        task_Y = Y[:, task_col]
+        unique_X, groups_idx_X = npi.group_by(task_X,
+                                              np.arange(nX))
+        unique_Y, groups_idx_Y = npi.group_by(task_Y,
+                                              np.arange(nY))
+        A = np.zeros((nX, nY))
+        
+        for i, tx in enumerate(unique_X):
+            for j, ty in enumerate(unique_Y):
+                indX = groups_idx_X[i]
+                indY = groups_idx_Y[j]
+                order_tx = order_delta[tx]
+                order_ty = order_delta[ty]
+                a_xy = self.deltainv[order_tx, order_ty]
+                A[indX[:, None], indY] = a_xy
+        if G_train is None:
+            Q = self._apply_kernel(kernel, X_data, Y_data, gamma)
+        else:
+            Q = G_train
+        
+        return np.multiply(A, Q)
+
+    def _matrix_dots(self, R, S):
+        delta_inv = self.deltainv
+        X = Y = self.X_train
+        task_col = self.task_info
+        order_delta = self.order_delta
+        nX = X.shape[0]
+        nY = Y.shape[0]
+        task_X = X[:, task_col]
+        task_Y = Y[:, task_col]
+        unique_X, groups_idx_X = npi.group_by(task_X,
+                                                  np.arange(nX))
+        unique_Y, groups_idx_Y = npi.group_by(task_Y,
+                                              np.arange(nY))
+        M = np.zeros((nX, nY))    
+        
+        for i, tx in enumerate(unique_X):
+            indX = groups_idx_X[i]
+            order_tx = order_delta[tx]
+            # order_R = order_delta[float(R)]
+            order_R = order_delta[R]
+            for j, ty in enumerate(unique_Y):                
+                indY = groups_idx_Y[j]                
+                order_ty = order_delta[ty]                
+                # order_S = order_delta[float(S)]
+                order_S = order_delta[S]
+                # m_RR = delta_inv[order_tx, order_R] * delta_inv[order_R, order_ty]
+                # m_SS = delta_inv[order_tx, order_S] * delta_inv[order_S, order_ty]
+                m_RS = delta_inv[order_tx, order_R] * delta_inv[order_S, order_ty]
+                # m = m_RR + m_SS - 2 * m_RS
+                M[indX[:, None], indY] = m_RS #+ 1e-16 # añadimos el 0 máquina
+        return M
+
+    
+    def distances_between_tasks(self, G_train):
+        reg = self.svm
+        alpha = reg.dual_coef_.flatten()
+
+        tasks = self.unique
+        T = len(tasks)
+        self.dots = np.zeros([T, T])
+        self.dots_norm = np.zeros([T, T])
+        self.dists = np.zeros([T, T])
+        self.dists_norm = np.zeros([T, T]) 
+        for R, tR in enumerate(tasks):
+            for S, tS in enumerate(tasks):
+                if S >= R:
+                    # print(R, S)
+                    M_RS = self._matrix_dots(tR, tS)
+                    G_distRS = np.multiply(M_RS, G_train)# self._mtl_kernel_fused_dist(tR, tS, G_train)
+                    # print(M_RS)
+                    G_dist = G_distRS
+                    dot = alpha.T @ G_dist[reg.support_, reg.support_[:,None]] @ alpha
+                    # if S==R and dot < 0:
+                    #     # print(R, S)
+                    #     # print(dot)
+                    #     # print('M_RS')
+                    #     # print(M_RS)
+                    #     # print('G_train')
+                    #     # print(G_train)
+                    #     # print('G_dist')
+                    #     # print(G_dist)
+                    self.dots[S, R] = self.dots[R, S] = dot
+                    self.dots_norm[S, R] = self.dots_norm[R, S] = dot
+        # print(self.dots)
+        for i, ti in enumerate(tasks):
+            for j, tj in enumerate(tasks):
+                self.dists[i, j] = self.dots[i, i] + self.dots[j, j] - 2 * self.dots[i, j]
+                # print('dif:', self.dists[i, j])
+                # print('sum:', (self.dots[i, i] + self.dots[j, j]))
+                # print('quot:', self.dists[i, j]/(self.dots[i, i] + self.dots[j, j]))
+                self.dists_norm[i, j] = self.dists[i, j]/(self.dots[i, i] + self.dots[j, j])
+        return self.dists
+    
+    # @timer
+    def _optimize_delta_entropy(self, G_train):
+        dists = self.distances_between_tasks(G_train)
+        # print('dots')
+        # print(self.dots)
+        # print('dists')
+        # print(dists)
+        # print(self.lamb)
+
+        # B computation
+        # num = np.exp(-(1/self.lamb) * dists) # + 1e-16 * np.ones(dists.shape) # añadimos el 0 máquina
+        # den = np.sum(num, axis=0)
+        # print('B antes')
+        # print(-num/den)
+
+        # B stable computation
+        den = np.zeros(dists.shape)
+        for t in range(dists.shape[0]):
+            exponent = dists - dists[t, :]
+            # print(exponent)
+            # np.fill_diagonal(exponent, 0)
+            den += np.exp((1 / self.lamb) * exponent)
+        # print('den')
+        # print(den)
+        B =  -1. / den
+        # print('B despues')
+        # print(B)
+        # complete B
+        for i in range(len(self.order_delta)):
+            B[i, i] = 0
+            B[i, i] = -np.sum(B[i, :])
+        # print('B')
+        # print(B)
+        self.delta = B + B.T
+        # print(self.delta)
+        # print('after complete')
+        # print(self.delta)
+    
+    def optimize_delta(self, G_train):
+        # print('opimize delta. G_train')
+        # print(G_train)
+        if self.opt == 'heuristic':
+            dists = self.distances_between_tasks(G_train) + 1e-16
+            # print(dists)
+            B = -1/dists
+            
+            # print('dots')
+            # print(self.dots)
+            for i, ti in enumerate(self.unique):
+                B[i, i] = 0
+                B[i, :] /= -np.sum(B[i, :])
+                B[i, i] = -np.sum(B[i, :])
+            # print(B)
+            self.delta = (B + B.T)/2
+            # self.delta /= np.sum(np.abs(self.delta)) # rho in [0, 1]
+        elif self.opt == 'entropy':
+            self._optimize_delta_entropy(G_train)
+        else:
+            # print('No such optimization method')
+            exit()
+
+class extFusedMTLSVC(extFusedMTLSVM):
+    """docstring for mtlSVM."""
+    def __init__(self, C=1.0, kernel='rbf', degree=3,
+                 gamma='auto', coef0=0.0,
+                 shrinking=True, probability=False, tol=0.001, cache_size=200,
+                 class_weight=None, verbose=False, max_iter=-1, task_info=None,
+                 decision_function_shape='ovr', random_state=None, mu=1.0, max_iter_ext=-1,
+                 opt='entropy', tol_ext=1e-3, delta=None, order_delta=None, lamb=1e-3,
+                 ind_reg=True):
+        super(extFusedMTLSVC, self).__init__(C, kernel, degree, gamma,
+                                     coef0,
+                                     shrinking, tol, cache_size, verbose,
+                                     max_iter, mu, task_info, max_iter_ext,
+                                     opt, tol_ext, delta, order_delta, lamb)
+        self.probability = probability
+        self.class_weight = class_weight
+        self.decision_function_shape = decision_function_shape
+        self.random_state = random_state
+
+    
+    def fit(self, X, y, task_info=-1, sample_weight=None, **kwargs):
+        kernel = 'precomputed'  # We use the GRAMM matrix
+        gamma = 'auto'
+        self.svm = SVC(self.C, kernel, self.degree, gamma, self.coef0,
+                              self.shrinking, self.probability, self.tol, self.cache_size,
+                              self.class_weight, self.verbose, self.max_iter,
+                              self.decision_function_shape, self.random_state)
+        return super().fit(X, y, task_info, **kwargs)
+    
+    def decision_function(self, X):
+        G_test = self._mtl_kernel_fused(X, self.X_train, self.kernel, self.gamma, self.task_info)
+        return self.svm.decision_function(G_test)
+
+    def score(self, X, y, sample_weight=None, scoring=None):
+        pred = self.decision_function(X)
+        return hinge_loss(y, pred)
+
+
+class extFusedMTLSVR(extFusedMTLSVM):
+    """docstring for mtlSVM."""
+    def __init__(self, kernel='rbf', degree=3, gamma='auto',
+                 coef0=0.0, tol=0.001, C=1.0,
+                 epsilon=0.1, shrinking=True, cache_size=200,
+                 verbose=False, max_iter=-1, mu=1.0, task_info=None, max_iter_ext=-1, opt='entropy',
+                 tol_ext=1e-3, delta=None, order_delta=None, lamb=1e-3,
+                 ind_reg=True):
+        super(extFusedMTLSVR, self).__init__(C, kernel, degree, gamma,
+                                     coef0, shrinking, tol, cache_size,
+                                     verbose, max_iter, mu, task_info, max_iter_ext,
+                                     opt, tol_ext, delta, order_delta, lamb)
+        self.epsilon = epsilon
+
+
+    def fit(self, X, y, task_info=-1, sample_weight=None, **kwargs):
+        kernel = 'precomputed'  # We use the GRAMM matrix
+        gamma = 'auto'
+        self.svm = SVR(self.kernel, self.degree, self.gamma, self.coef0,
+                       self.tol, self.C, self.epsilon, self.shrinking, self.cache_size,
+                       self.verbose, self.max_iter)
+        return super().fit(X, y, task_info, **kwargs)
+
+    def score(self, X, y, sample_weight=None, scoring=None):
+        pred = self.predict(X)
+        return mae(y, pred)
