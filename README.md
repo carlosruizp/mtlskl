@@ -3,7 +3,7 @@ Implementation of ConvexMTL neural networks using PyTorch. -->
 
 # MTLSKL
 
-This is a package that implements some multi-task learning (MTL) methods following the scikit-learn style.
+This is a package that implements the multi-task learning (MTL) methods presented in [[1]](#1), [[2]](#2), [[3]](#3) and [[4]](#4) following the scikit-learn style.
 
 It includes the following implementations:
 * Convex MTL L1, L2 and LS-SVMs, as explained in [Convex Formulation for Multi-Task L1-, L2-, and LS-SVMs](https://www.scinapse.io/papers/3173400759).
@@ -46,5 +46,30 @@ pred = estim.predict(X_test)
 mtlds.plot_data_functions(X_test, pred)
 
 ```
+
+# Cite our work
+If you use this implementation, please cite the corresponding papers, which are shown below.
+
+# Papers
+<a id="1">[1]</a> 
+Carlos Ruiz and Carlos M. Alaíz and José R. Dorronsoro (2019). 
+Convex Graph Laplacian Multi-Task Learning SVM. 
+HAIS Proceedings. Vol. 1173, Springer, 404-415.
+
+<a id="2">[2]</a> 
+Carlos Ruiz and Carlos M. Alaíz and José R. Dorronsoro (2020). 
+Convex Graph Laplacian Multi-Task Learning SVM.
+ICANN. Vol. 12397. Springer, 142-154.
+
+<a id="3">[3]</a>
+Carlos Ruiz and Carlos M. Alaíz and José R. Dorronsoro (2021). 
+Convex formulation for multi-task L1-, L2-, and LS-SVMs.
+Neurocomputing 456, 404-415.
+
+<a id="4">[4]</a> 
+Carlos Ruiz and Carlos M. Alaíz and José R. Dorronsoro (2021). 
+Adaptive Graph Laplacian for Convex Multi-Task Learning SVM.
+HAIS Proceedings. Vol. 12886, Springer, 219-230.
+
 
 
